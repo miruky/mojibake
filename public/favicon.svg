@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="mojibakeのアイコン">
+  <title>mojibake</title>
+  <rect width="64" height="64" rx="14" fill="#14161c"/>
+  <rect x="10" y="10" width="44" height="44" rx="8" fill="none" stroke="#e8eaf0" stroke-width="3.5"/>
+  <text x="16" y="38" font-size="16" font-family="monospace" fill="#e8b04b">8F</text>
+  <path d="M38 24l8 16M46 24l-8 16" stroke="#ff8a76" stroke-width="3.5" stroke-linecap="round"/>
+</svg>
