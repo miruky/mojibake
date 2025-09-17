@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { decodeCandidates, explainGarbled, japaneseScore } from './analyze';
+import { decodeCandidates, explainGarbled, textScore } from './analyze';
 import { decodeAs, encodeAs } from './encodings';
 
 describe('encodeAs(逆引きエンコーダ)', () => {
@@ -18,13 +18,18 @@ describe('encodeAs(逆引きエンコーダ)', () => {
   });
 });
 
-describe('japaneseScore', () => {
+describe('textScore', () => {
   it('自然な日本語は復号失敗の混ざった文字列より高い', () => {
-    expect(japaneseScore('こんにちは、世界。')).toBeGreaterThan(japaneseScore('縺薙ｓ�■縺ｯ'));
+    expect(textScore('こんにちは、世界。')).toBeGreaterThan(textScore('縺薙ｓ�■縺ｯ'));
   });
 
   it('置換文字だらけの文字列は負になる', () => {
-    expect(japaneseScore('����')).toBeLessThan(0);
+    expect(textScore('����')).toBeLessThan(0);
+  });
+
+  it('ハングルやキリルも読める文章として加点する', () => {
+    expect(textScore('안녕하세요')).toBeGreaterThan(0);
+    expect(textScore('Привет мир')).toBeGreaterThan(0);
   });
 });
 
@@ -40,6 +45,14 @@ describe('decodeCandidates', () => {
     const bytes = encodeAs('お疲れさまです。本日の議事録を送ります。', 'shift_jis')!;
     const [top] = decodeCandidates(bytes);
     expect(top?.encodingId).toBe('shift_jis');
+  });
+
+  it('中国語・韓国語などの拡張エンコーディングも候補に含む', () => {
+    const ids = decodeCandidates(new TextEncoder().encode('test')).map((c) => c.encodingId);
+    expect(ids).toContain('gbk');
+    expect(ids).toContain('big5');
+    expect(ids).toContain('euc-kr');
+    expect(ids).toContain('windows-1251');
   });
 });
 
