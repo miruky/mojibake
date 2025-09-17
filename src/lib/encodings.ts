@@ -3,19 +3,51 @@
 export interface EncodingDef {
   id: string; // TextDecoderのラベル
   name: string;
+  region: string; // UIに添える言語・地域のヒント
   // 化けた文字列の逆引き(再エンコード)対象にするか。
   // ISO-2022-JPは状態を持つため逆引きには使わない
   reversible: boolean;
+  // 化け復元の「元の符号」候補に含めるか。
+  // 偽陽性を抑えるため、復元は日本語まわりの符号に絞る
+  garbleSource: boolean;
 }
 
 export const ENCODINGS: EncodingDef[] = [
-  { id: 'utf-8', name: 'UTF-8', reversible: true },
-  { id: 'shift_jis', name: 'Shift_JIS(CP932)', reversible: true },
-  { id: 'euc-jp', name: 'EUC-JP', reversible: true },
-  { id: 'iso-2022-jp', name: 'ISO-2022-JP(JIS)', reversible: false },
-  { id: 'windows-1252', name: 'Windows-1252(欧文)', reversible: true },
-  { id: 'utf-16le', name: 'UTF-16LE', reversible: false },
-  { id: 'utf-16be', name: 'UTF-16BE', reversible: false },
+  { id: 'utf-8', name: 'UTF-8', region: 'Unicode', reversible: true, garbleSource: true },
+  {
+    id: 'shift_jis',
+    name: 'Shift_JIS(CP932)',
+    region: '日本語',
+    reversible: true,
+    garbleSource: true,
+  },
+  { id: 'euc-jp', name: 'EUC-JP', region: '日本語', reversible: true, garbleSource: true },
+  {
+    id: 'iso-2022-jp',
+    name: 'ISO-2022-JP(JIS)',
+    region: '日本語',
+    reversible: false,
+    garbleSource: true,
+  },
+  {
+    id: 'windows-1252',
+    name: 'Windows-1252',
+    region: '西欧',
+    reversible: true,
+    garbleSource: true,
+  },
+  { id: 'gbk', name: 'GBK', region: '中国語(簡体)', reversible: false, garbleSource: false },
+  { id: 'big5', name: 'Big5', region: '中国語(繁体)', reversible: false, garbleSource: false },
+  { id: 'euc-kr', name: 'EUC-KR', region: '韓国語', reversible: false, garbleSource: false },
+  {
+    id: 'windows-1251',
+    name: 'Windows-1251',
+    region: 'キリル',
+    reversible: false,
+    garbleSource: false,
+  },
+  { id: 'utf-16le', name: 'UTF-16LE', region: 'Unicode', reversible: false, garbleSource: false },
+  { id: 'utf-16be', name: 'UTF-16BE', region: 'Unicode', reversible: false, garbleSource: false },
 ];
 
 export function decodeAs(bytes: Uint8Array, id: string): string | null {
