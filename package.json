@@ -1,7 +1,7 @@
 {
   "name": "mojibake",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "文字化けの原因をバイト列から逆引きするエンコーディング解析器",
   "scripts": {

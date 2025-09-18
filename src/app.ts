@@ -1,16 +1,20 @@
 import { decodeCandidates, explainGarbled } from './lib/analyze';
 import { detectBom, parseBytes, toHexDump } from './lib/bytes';
+import { decodeState, encodeState } from './lib/share';
 import { copy, logoMark, monitor, moon, sun } from './ui/icons';
 import { countUp, playEntrance, revealCards } from './ui/motion';
 
-const SAMPLE_GARBLED = '縺薙ｓ縺ｫ縺｡縺ｯ縲∽ｸ也阜';
-const SAMPLE_BYTES = '82 b1 82 f1 82 c9 82 bf 82 cd 81 41 90 a2 8a 45';
+type Mode = 'garbled' | 'bytes';
+type ThemeMode = 'light' | 'dark' | 'auto';
+
+// モードごとの実例。サンプルボタンで順に切り替えて化け方の幅を見せる。
+const SAMPLES: Record<Mode, string[]> = {
+  garbled: ['縺薙ｓ縺ｫ縺｡縺ｯ縲∽ｸ也阜', 'ã“ã‚“ã«ã¡ã¯', '譁・喧縺代◆譁・ｭ怜・'],
+  bytes: ['82 b1 82 f1 82 c9 82 bf 82 cd 81 41 90 a2 8a 45', '%E3%81%82%E3%81%84%E3%81%86'],
+};
 
 const STATE_KEY = 'mojibake-state';
 const THEME_KEY = 'mojibake-theme';
-
-type Mode = 'garbled' | 'bytes';
-type ThemeMode = 'light' | 'dark' | 'auto';
 
 const HINTS: Record<Mode, string> = {
   garbled:
@@ -22,6 +26,7 @@ const HINTS: Record<Mode, string> = {
 export class App {
   private readonly el: Record<string, HTMLElement> = {};
   private mode: Mode = 'garbled';
+  private sampleIndex = 0;
   private toastTimer = 0;
 
   constructor(private readonly root: HTMLElement) {
@@ -62,6 +67,7 @@ export class App {
             </div>
             <div class="console__tools">
               <button type="button" class="txt-btn" data-act="sample">サンプル</button>
+              <button type="button" class="txt-btn" data-act="share">共有リンク</button>
               <button type="button" class="txt-btn" data-act="clear">消去</button>
             </div>
           </div>
@@ -80,6 +86,9 @@ export class App {
 
         <footer class="footer">
           <p>復号は <code>TextDecoder</code> 標準を使い、Shift_JIS・EUC-JPの逆引き表は起動時に組み立てる。対応: UTF-8 / Shift_JIS / EUC-JP / ISO-2022-JP / Windows-1252 / GBK / Big5 / EUC-KR / Windows-1251 / UTF-16。貼ったデータは送信しない。</p>
+          <p class="shortcuts">
+            <kbd>g</kbd> 化けた文字&ensp;<kbd>b</kbd> バイト列&ensp;<kbd>e</kbd> 例&ensp;<kbd>l</kbd> 共有リンク
+          </p>
         </footer>
       </div>
       <p class="sr-only" data-id="live" aria-live="polite"></p>
@@ -100,15 +109,22 @@ export class App {
   // ---- 状態の保存と復元 ----
 
   private restore(): void {
-    try {
-      const raw = localStorage.getItem(STATE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as { mode?: Mode; input?: string };
-        if (parsed.mode === 'garbled' || parsed.mode === 'bytes') this.mode = parsed.mode;
-        if (typeof parsed.input === 'string') this.input().value = parsed.input;
+    // 共有リンクのハッシュを最優先。無ければ前回の保存を読む。
+    const shared = location.hash ? decodeState(location.hash) : null;
+    if (shared) {
+      this.mode = shared.mode;
+      this.input().value = shared.input;
+    } else {
+      try {
+        const raw = localStorage.getItem(STATE_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw) as { mode?: Mode; input?: string };
+          if (parsed.mode === 'garbled' || parsed.mode === 'bytes') this.mode = parsed.mode;
+          if (typeof parsed.input === 'string') this.input().value = parsed.input;
+        }
+      } catch {
+        /* 保存が読めなくても既定で動く */
       }
-    } catch {
-      /* 保存が読めなくても既定で動く */
     }
     this.syncModeUi();
   }
@@ -138,17 +154,51 @@ export class App {
     this.root.querySelectorAll<HTMLElement>('[data-act]').forEach((btn) => {
       btn.addEventListener('click', () => this.handleAction(btn.dataset.act ?? ''));
     });
+
+    document.addEventListener('keydown', (e) => this.onKeydown(e));
+  }
+
+  private onKeydown(e: KeyboardEvent): void {
+    const target = e.target as HTMLElement | null;
+    const editing =
+      target?.tagName === 'TEXTAREA' || target?.tagName === 'INPUT' || target?.tagName === 'SELECT';
+    if (editing || e.altKey || e.ctrlKey || e.metaKey) return;
+    const actions: Record<string, () => void> = {
+      g: () => this.switchMode('garbled'),
+      b: () => this.switchMode('bytes'),
+      e: () => this.handleAction('sample'),
+      l: () => this.handleAction('share'),
+    };
+    const run = actions[e.key.toLowerCase()];
+    if (run) {
+      e.preventDefault();
+      run();
+    }
   }
 
   private handleAction(act: string): void {
     if (act === 'sample') {
-      this.input().value = this.mode === 'garbled' ? SAMPLE_GARBLED : SAMPLE_BYTES;
+      const list = SAMPLES[this.mode];
+      this.input().value = list[this.sampleIndex % list.length]!;
+      this.sampleIndex += 1;
       this.onInput();
+    } else if (act === 'share') {
+      this.shareLink();
     } else if (act === 'clear') {
       this.input().value = '';
       this.input().focus();
       this.onInput();
     }
+  }
+
+  private shareLink(): void {
+    if (this.input().value.trim() === '') {
+      this.toast('入力するとリンクを作れる');
+      return;
+    }
+    const url = `${location.origin}${location.pathname}#${encodeState({ mode: this.mode, input: this.input().value })}`;
+    history.replaceState(null, '', url);
+    void this.copyText(url, '共有リンクをコピーした');
   }
 
   private onInput(): void {
@@ -170,10 +220,7 @@ export class App {
       btn.setAttribute('aria-pressed', String(btn.dataset.mode === this.mode));
     });
     this.el['hint']!.textContent = HINTS[this.mode];
-    this.input().setAttribute(
-      'placeholder',
-      this.mode === 'garbled' ? SAMPLE_GARBLED : SAMPLE_BYTES,
-    );
+    this.input().setAttribute('placeholder', SAMPLES[this.mode][0]!);
   }
 
   // ---- テーマ ----
@@ -320,7 +367,7 @@ export class App {
 
     const text = document.createElement('p');
     text.className = mono ? 'finding__recovered finding__recovered--mono' : 'finding__recovered';
-    text.textContent = recovered === '' ? '(空)' : recovered;
+    fillRecovered(text, recovered);
 
     const foot = document.createElement('div');
     foot.className = 'finding__foot';
@@ -337,7 +384,7 @@ export class App {
     copyBtn.className = 'icon-btn';
     copyBtn.innerHTML = copy;
     copyBtn.append('コピー');
-    copyBtn.addEventListener('click', () => void this.copyText(recovered));
+    copyBtn.addEventListener('click', () => void this.copyText(recovered, 'コピーした'));
     foot.appendChild(copyBtn);
 
     card.append(cause, text, foot);
@@ -357,7 +404,7 @@ export class App {
     this.el['results']!.replaceChildren(note);
   }
 
-  private async copyText(text: string): Promise<void> {
+  private async copyText(text: string, done: string): Promise<void> {
     try {
       if (navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(text);
@@ -371,7 +418,7 @@ export class App {
         document.execCommand('copy');
         tmp.remove();
       }
-      this.toast('コピーした');
+      this.toast(done);
     } catch {
       this.toast('コピーできなかった');
     }
@@ -396,4 +443,23 @@ function strong(text: string): HTMLElement {
   const b = document.createElement('b');
   b.textContent = text;
   return b;
+}
+
+// 復元文を流し込む。復号失敗の置換文字(U+FFFD)は印をつけて、どこが化けたか分かるようにする。
+function fillRecovered(target: HTMLElement, text: string): void {
+  if (text === '') {
+    target.textContent = '(空)';
+    return;
+  }
+  const parts = text.split('�');
+  parts.forEach((part, i) => {
+    if (i > 0) {
+      const mark = document.createElement('span');
+      mark.className = 'repl';
+      mark.textContent = '�';
+      mark.title = '復号できなかったバイト';
+      target.appendChild(mark);
+    }
+    if (part) target.append(document.createTextNode(part));
+  });
 }
