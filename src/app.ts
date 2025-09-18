@@ -1,155 +1,399 @@
 import { decodeCandidates, explainGarbled } from './lib/analyze';
 import { detectBom, parseBytes, toHexDump } from './lib/bytes';
+import { copy, logoMark, monitor, moon, sun } from './ui/icons';
+import { countUp, playEntrance, revealCards } from './ui/motion';
 
 const SAMPLE_GARBLED = '縺薙ｓ縺ｫ縺｡縺ｯ縲∽ｸ也阜';
 const SAMPLE_BYTES = '82 b1 82 f1 82 c9 82 bf 82 cd 81 41 90 a2 8a 45';
 
-const LOGO_SVG = `
-<svg viewBox="0 0 64 64" width="44" height="44" role="img" aria-label="mojibakeのロゴ">
-  <title>mojibake</title>
-  <rect x="8" y="8" width="48" height="48" rx="10" fill="none" stroke="currentColor" stroke-width="4"/>
-  <text x="18" y="38" font-size="20" font-family="monospace" fill="#e8b04b">8F</text>
-  <path d="M40 24l8 16M48 24l-8 16" stroke="#ff8a76" stroke-width="4" stroke-linecap="round"/>
-</svg>`;
+const STATE_KEY = 'mojibake-state';
+const THEME_KEY = 'mojibake-theme';
 
 type Mode = 'garbled' | 'bytes';
+type ThemeMode = 'light' | 'dark' | 'auto';
+
+const HINTS: Record<Mode, string> = {
+  garbled:
+    '画面に出た化けた文字列をそのまま貼る。「何で書かれたバイト列を、何として誤読したか」を総当たりして復元候補を出す。',
+  bytes:
+    '16進ダンプ・%エンコード・Base64のいずれかを貼る。全エンコーディングで復号し、読める文章らしさ順に並べる。',
+};
 
 export class App {
   private readonly el: Record<string, HTMLElement> = {};
   private mode: Mode = 'garbled';
+  private toastTimer = 0;
 
   constructor(private readonly root: HTMLElement) {
     this.render();
+    this.cacheEls();
+    this.restore();
     this.wire();
+    this.updateThemeButtons();
+    this.update();
+    playEntrance(this.root);
   }
 
   private render(): void {
     this.root.innerHTML = `
-      <header class="site-header">
-        <span class="logo" aria-hidden="true">${LOGO_SVG}</span>
-        <div>
-          <h1>mojibake</h1>
-          <p class="tagline">文字化けの原因を逆引きするエンコーディング解析器</p>
-        </div>
-      </header>
-      <main>
-        <section class="pane">
-          <div class="pane-head">
-            <div class="tabs">
-              <button type="button" class="tab-btn active" data-id="tab-garbled">化けた文字から</button>
-              <button type="button" class="tab-btn" data-id="tab-bytes">バイト列から</button>
+      <div class="shell">
+        <header class="masthead">
+          <div class="masthead__id" data-enter>
+            <span class="masthead__mark">${logoMark}</span>
+            <div>
+              <p class="kicker">encoding forensics</p>
+              <h1 class="masthead__title">mojibake</h1>
             </div>
-            <button type="button" class="ghost-btn" data-id="sample">サンプルを読み込む</button>
           </div>
-          <p class="hint" data-id="mode-hint">画面に表示された化けた文字列を貼ると、「何で書かれたものを何として誤読したか」の組み合わせを総当たりして復元候補を出す</p>
-          <textarea data-id="input" rows="5" spellcheck="false" placeholder="${SAMPLE_GARBLED}"></textarea>
+          <div class="seg" role="group" aria-label="配色テーマ" data-enter>
+            <button type="button" data-theme-opt="light" aria-label="明るい配色" title="明るい配色">${sun}</button>
+            <button type="button" data-theme-opt="auto" aria-label="OSの設定に従う" title="OSの設定に従う">${monitor}</button>
+            <button type="button" data-theme-opt="dark" aria-label="暗い配色" title="暗い配色">${moon}</button>
+          </div>
+        </header>
+
+        <p class="lede" data-enter>化けた文字列やバイト列を貼ると、「何を何として誤読したか」を総当たりで突き止め、元の文章を復元する。解析はすべてブラウザ内で完結する。</p>
+
+        <section class="console" aria-label="入力" data-enter>
+          <div class="console__head">
+            <div class="seg seg--mode" role="group" aria-label="入力の種類">
+              <button type="button" data-mode="garbled">化けた文字</button>
+              <button type="button" data-mode="bytes">バイト列</button>
+            </div>
+            <div class="console__tools">
+              <button type="button" class="txt-btn" data-act="sample">サンプル</button>
+              <button type="button" class="txt-btn" data-act="clear">消去</button>
+            </div>
+          </div>
+          <p class="hint" data-id="hint"></p>
+          <textarea data-id="input" rows="4" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
           <p class="byte-note" data-id="byte-note" hidden></p>
         </section>
-        <section class="pane">
-          <h2>解析結果</h2>
-          <div class="results" data-id="results">(入力すると候補が表示される)</div>
+
+        <section class="report" aria-label="解析結果">
+          <div class="report__head">
+            <h2 class="report__title"><span class="kicker">結果</span>復元候補</h2>
+            <span class="count" data-id="count"></span>
+          </div>
+          <div class="findings" data-id="results"></div>
         </section>
-      </main>
-      <footer class="site-footer">
-        <p>対応: UTF-8、Shift_JIS(CP932)、EUC-JP、ISO-2022-JP、Windows-1252、UTF-16LE/BE。Shift_JISとEUC-JPの逆引き表はブラウザのTextDecoderから実行時に構築する。解析はすべてブラウザ内で行う。</p>
-      </footer>
+
+        <footer class="footer">
+          <p>復号は <code>TextDecoder</code> 標準を使い、Shift_JIS・EUC-JPの逆引き表は起動時に組み立てる。対応: UTF-8 / Shift_JIS / EUC-JP / ISO-2022-JP / Windows-1252 / GBK / Big5 / EUC-KR / Windows-1251 / UTF-16。貼ったデータは送信しない。</p>
+        </footer>
+      </div>
+      <p class="sr-only" data-id="live" aria-live="polite"></p>
+      <div class="toast" data-id="toast" role="status"></div>
     `;
+  }
+
+  private cacheEls(): void {
     this.root.querySelectorAll<HTMLElement>('[data-id]').forEach((node) => {
       this.el[node.dataset.id ?? ''] = node;
     });
   }
 
+  private input(): HTMLTextAreaElement {
+    return this.el['input'] as HTMLTextAreaElement;
+  }
+
+  // ---- 状態の保存と復元 ----
+
+  private restore(): void {
+    try {
+      const raw = localStorage.getItem(STATE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { mode?: Mode; input?: string };
+        if (parsed.mode === 'garbled' || parsed.mode === 'bytes') this.mode = parsed.mode;
+        if (typeof parsed.input === 'string') this.input().value = parsed.input;
+      }
+    } catch {
+      /* 保存が読めなくても既定で動く */
+    }
+    this.syncModeUi();
+  }
+
+  private persist(): void {
+    try {
+      localStorage.setItem(
+        STATE_KEY,
+        JSON.stringify({ mode: this.mode, input: this.input().value }),
+      );
+    } catch {
+      /* 保存できなくても解析は動く */
+    }
+  }
+
+  // ---- イベント結線 ----
+
   private wire(): void {
-    const input = this.el['input'] as HTMLTextAreaElement;
-    input.addEventListener('input', () => this.update());
-    this.el['tab-garbled']!.addEventListener('click', () => this.switchMode('garbled'));
-    this.el['tab-bytes']!.addEventListener('click', () => this.switchMode('bytes'));
-    this.el['sample']!.addEventListener('click', () => {
-      input.value = this.mode === 'garbled' ? SAMPLE_GARBLED : SAMPLE_BYTES;
-      this.update();
+    this.input().addEventListener('input', () => this.onInput());
+
+    this.root.querySelectorAll<HTMLElement>('[data-mode]').forEach((btn) => {
+      btn.addEventListener('click', () => this.switchMode(btn.dataset.mode as Mode));
+    });
+    this.root.querySelectorAll<HTMLElement>('[data-theme-opt]').forEach((btn) => {
+      btn.addEventListener('click', () => this.setTheme(btn.dataset.themeOpt as ThemeMode));
+    });
+    this.root.querySelectorAll<HTMLElement>('[data-act]').forEach((btn) => {
+      btn.addEventListener('click', () => this.handleAction(btn.dataset.act ?? ''));
     });
   }
 
-  private switchMode(mode: Mode): void {
-    this.mode = mode;
-    this.el['tab-garbled']!.classList.toggle('active', mode === 'garbled');
-    this.el['tab-bytes']!.classList.toggle('active', mode === 'bytes');
-    const input = this.el['input'] as HTMLTextAreaElement;
-    input.placeholder = mode === 'garbled' ? SAMPLE_GARBLED : SAMPLE_BYTES;
-    this.el['mode-hint']!.textContent =
-      mode === 'garbled'
-        ? '画面に表示された化けた文字列を貼ると、「何で書かれたものを何として誤読したか」の組み合わせを総当たりして復元候補を出す'
-        : 'バイト列(16進ダンプ・%エンコード・Base64)を貼ると、全エンコーディングで復号して日本語らしさ順に並べる';
-    input.value = '';
+  private handleAction(act: string): void {
+    if (act === 'sample') {
+      this.input().value = this.mode === 'garbled' ? SAMPLE_GARBLED : SAMPLE_BYTES;
+      this.onInput();
+    } else if (act === 'clear') {
+      this.input().value = '';
+      this.input().focus();
+      this.onInput();
+    }
+  }
+
+  private onInput(): void {
+    this.persist();
     this.update();
   }
 
-  private update(): void {
-    const text = (this.el['input'] as HTMLTextAreaElement).value;
-    const results = this.el['results']!;
-    const byteNote = this.el['byte-note']!;
-    byteNote.hidden = true;
-    if (text.trim() === '') {
-      results.textContent = '(入力すると候補が表示される)';
-      return;
-    }
-    if (this.mode === 'garbled') this.renderGarbled(text, results);
-    else this.renderBytes(text, results, byteNote);
+  private switchMode(mode: Mode): void {
+    if (mode === this.mode) return;
+    this.mode = mode;
+    this.input().value = '';
+    this.syncModeUi();
+    this.persist();
+    this.update();
   }
 
-  private renderGarbled(text: string, results: HTMLElement): void {
-    const candidates = explainGarbled(text).slice(0, 6);
-    if (candidates.length === 0) {
-      results.textContent =
-        '復元候補が見つからない。化け方が二重(2回誤読)か、対応外のエンコーディングの可能性がある';
-      return;
+  private syncModeUi(): void {
+    this.root.querySelectorAll<HTMLElement>('[data-mode]').forEach((btn) => {
+      btn.setAttribute('aria-pressed', String(btn.dataset.mode === this.mode));
+    });
+    this.el['hint']!.textContent = HINTS[this.mode];
+    this.input().setAttribute(
+      'placeholder',
+      this.mode === 'garbled' ? SAMPLE_GARBLED : SAMPLE_BYTES,
+    );
+  }
+
+  // ---- テーマ ----
+
+  private currentTheme(): ThemeMode {
+    const set = document.documentElement.dataset.theme;
+    return set === 'light' || set === 'dark' ? set : 'auto';
+  }
+
+  private setTheme(mode: ThemeMode): void {
+    if (mode === 'auto') {
+      delete document.documentElement.dataset.theme;
+      try {
+        localStorage.removeItem(THEME_KEY);
+      } catch {
+        /* 保存できなくても切り替わる */
+      }
+    } else {
+      document.documentElement.dataset.theme = mode;
+      try {
+        localStorage.setItem(THEME_KEY, mode);
+      } catch {
+        /* 同上 */
+      }
     }
-    results.innerHTML = '';
-    candidates.forEach((candidate, index) => {
-      const card = document.createElement('div');
-      card.className = index === 0 ? 'result-card best' : 'result-card';
-      card.innerHTML = `
-        <p class="result-cause">${candidate.originalName} で書かれたバイト列を ${candidate.misreadName} として読んだ</p>
-        <p class="result-text">${escapeHtml(candidate.recovered)}</p>
-        <p class="result-meta">らしさ ${candidate.score.toFixed(2)}${index === 0 ? ' / 最有力' : ''}</p>`;
-      results.appendChild(card);
+    this.updateThemeButtons();
+  }
+
+  private updateThemeButtons(): void {
+    const active = this.currentTheme();
+    this.root.querySelectorAll<HTMLElement>('[data-theme-opt]').forEach((btn) => {
+      btn.setAttribute('aria-pressed', String(btn.dataset.themeOpt === active));
     });
   }
 
-  private renderBytes(text: string, results: HTMLElement, byteNote: HTMLElement): void {
+  // ---- 解析と描画 ----
+
+  private update(): void {
+    const text = this.input().value;
+    const results = this.el['results']!;
+    const count = this.el['count']!;
+    this.el['byte-note']!.hidden = true;
+    count.textContent = '';
+
+    if (text.trim() === '') {
+      this.showNote('入力すると、原因と復元候補がここに並ぶ。');
+      this.el['live']!.textContent = '';
+      results.dataset.empty = 'true';
+      return;
+    }
+    delete results.dataset.empty;
+    if (this.mode === 'garbled') this.renderGarbled(text);
+    else this.renderBytes(text);
+  }
+
+  private renderGarbled(text: string): void {
+    const candidates = explainGarbled(text).slice(0, 6);
+    if (candidates.length === 0) {
+      this.showNote('復元候補が見つからない。化け方が二重(2回誤読)か、対応外の符号かもしれない。');
+      this.el['live']!.textContent = '復元候補なし';
+      return;
+    }
+    this.el['count']!.textContent = `${candidates.length}件`;
+    this.el['live']!.textContent =
+      `復元候補 ${candidates.length}件。最有力は ${candidates[0]!.recovered}`;
+    const cards = candidates.map((c, i) => {
+      const cause = document.createElement('p');
+      cause.className = 'finding__cause';
+      cause.append(
+        strong(c.originalName),
+        ' のバイト列を ',
+        strong(c.misreadName),
+        ' として読んだ',
+      );
+      const card = this.makeCard(i === 0, cause, c.recovered, c.score, false);
+      if (i === 0) {
+        const fix = document.createElement('p');
+        fix.className = 'finding__fix';
+        fix.append(
+          '直し方: 読み込み側を ',
+          strong(c.originalName),
+          ' 指定にすると正しく表示される',
+        );
+        card.appendChild(fix);
+      }
+      return card;
+    });
+    this.paint(cards);
+  }
+
+  private renderBytes(text: string): void {
     const parsed = parseBytes(text);
     if (!parsed) {
-      results.textContent =
-        'バイト列として読めない。16進(e3 81 82)・%エンコード・Base64を受け付ける';
+      this.showNote('バイト列として読めない。16進(e3 81 82)・%エンコード・Base64を受け付ける。');
+      this.el['live']!.textContent = 'バイト列として解釈できない';
       return;
     }
     const bom = detectBom(parsed.bytes);
-    byteNote.hidden = false;
-    byteNote.textContent =
-      `${parsed.bytes.length}バイト(${parsed.format}として解釈)` +
-      (bom ? ` / 先頭にBOM: ${bom}` : '') +
-      ` / ${toHexDump(parsed.bytes.slice(0, 24))}${parsed.bytes.length > 24 ? ' ...' : ''}`;
+    const note = this.el['byte-note']!;
+    note.hidden = false;
+    const head = toHexDump(parsed.bytes.slice(0, 24)) + (parsed.bytes.length > 24 ? ' …' : '');
+    note.textContent =
+      `${parsed.bytes.length} バイト・${FORMAT_LABEL[parsed.format]}として解釈` +
+      (bom ? ` ・先頭にBOM(${bom})` : '') +
+      `\n${head}`;
 
-    const candidates = decodeCandidates(parsed.bytes);
-    results.innerHTML = '';
-    candidates.forEach((candidate, index) => {
-      const card = document.createElement('div');
-      card.className = index === 0 && candidate.score > 0 ? 'result-card best' : 'result-card';
-      const preview =
-        candidate.text.length > 160 ? `${candidate.text.slice(0, 160)}...` : candidate.text;
-      card.innerHTML = `
-        <p class="result-cause">${candidate.encodingName} として復号</p>
-        <p class="result-text">${escapeHtml(preview)}</p>
-        <p class="result-meta">らしさ ${candidate.score.toFixed(2)} / 復号失敗 ${candidate.replacementCount}文字</p>`;
-      results.appendChild(card);
+    const candidates = decodeCandidates(parsed.bytes).slice(0, 8);
+    this.el['count']!.textContent = `${candidates.length}件`;
+    this.el['live']!.textContent =
+      `復号候補 ${candidates.length}件。最有力は ${candidates[0]?.encodingName ?? ''}`;
+    const cards = candidates.map((c, i) => {
+      const cause = document.createElement('p');
+      cause.className = 'finding__cause';
+      cause.append(strong(c.encodingName), ' として復号');
+      const region = document.createElement('span');
+      region.className = 'finding__region';
+      region.textContent = c.region;
+      cause.appendChild(region);
+      const preview = c.text.length > 200 ? `${c.text.slice(0, 200)}…` : c.text;
+      const best = i === 0 && c.score > 0;
+      const card = this.makeCard(best, cause, preview, c.score, true);
+      if (c.replacementCount > 0) {
+        const fail = card.querySelector('.finding__foot')!;
+        const span = document.createElement('span');
+        span.className = 'finding__fail';
+        span.textContent = `復号失敗 ${c.replacementCount}文字`;
+        fail.appendChild(span);
+      }
+      return card;
     });
+    this.paint(cards);
+  }
+
+  // 候補1件のカード。原因・復元文・らしさ・コピーで構成する。
+  private makeCard(
+    best: boolean,
+    cause: HTMLElement,
+    recovered: string,
+    score: number,
+    mono: boolean,
+  ): HTMLElement {
+    const card = document.createElement('article');
+    card.className = best ? 'finding finding--best' : 'finding';
+
+    const text = document.createElement('p');
+    text.className = mono ? 'finding__recovered finding__recovered--mono' : 'finding__recovered';
+    text.textContent = recovered === '' ? '(空)' : recovered;
+
+    const foot = document.createElement('div');
+    foot.className = 'finding__foot';
+    const scoreEl = document.createElement('span');
+    scoreEl.className = 'finding__score';
+    scoreEl.append('らしさ ');
+    const num = document.createElement('b');
+    countUp(num, score);
+    scoreEl.appendChild(num);
+    foot.appendChild(scoreEl);
+
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'icon-btn';
+    copyBtn.innerHTML = copy;
+    copyBtn.append('コピー');
+    copyBtn.addEventListener('click', () => void this.copyText(recovered));
+    foot.appendChild(copyBtn);
+
+    card.append(cause, text, foot);
+    return card;
+  }
+
+  private paint(cards: HTMLElement[]): void {
+    const results = this.el['results']!;
+    results.replaceChildren(...cards);
+    revealCards(cards);
+  }
+
+  private showNote(message: string): void {
+    const note = document.createElement('p');
+    note.className = 'findings__note';
+    note.textContent = message;
+    this.el['results']!.replaceChildren(note);
+  }
+
+  private async copyText(text: string): Promise<void> {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const tmp = document.createElement('textarea');
+        tmp.value = text;
+        tmp.style.position = 'fixed';
+        tmp.style.opacity = '0';
+        document.body.appendChild(tmp);
+        tmp.select();
+        document.execCommand('copy');
+        tmp.remove();
+      }
+      this.toast('コピーした');
+    } catch {
+      this.toast('コピーできなかった');
+    }
+  }
+
+  private toast(message: string): void {
+    const el = this.el['toast']!;
+    el.textContent = message;
+    el.classList.add('is-shown');
+    window.clearTimeout(this.toastTimer);
+    this.toastTimer = window.setTimeout(() => el.classList.remove('is-shown'), 1600);
   }
 }
 
-function escapeHtml(text: string): string {
-  return text
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;');
+const FORMAT_LABEL: Record<'hex' | 'percent' | 'base64', string> = {
+  hex: '16進',
+  percent: '%エンコード',
+  base64: 'Base64',
+};
+
+function strong(text: string): HTMLElement {
+  const b = document.createElement('b');
+  b.textContent = text;
+  return b;
 }
